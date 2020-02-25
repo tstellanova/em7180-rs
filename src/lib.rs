@@ -28,7 +28,7 @@ use generic_array::typenum::consts::*;
 use generic_array::{ArrayLength, GenericArray};
 
 /// Sometimes it's correct (0x28 << 1) instead of 0x28
-const EM7180_ADDRESS: u8 = 0x28;
+pub const EM7180_DEFAULT_ADDRESS: u8 = 0x28;
 
 /// The product ID for the EM7180 that this driver works with
 const EM7180_PRODUCT_ID: u8 = 0x80;
@@ -68,7 +68,7 @@ where
     where
         I2C: WriteRead<Error = E>,
     {
-        USFS::new_inv_usfs1(i2c, EM7180_ADDRESS, 8, false)
+        USFS::new_inv_usfs1(i2c, EM7180_DEFAULT_ADDRESS, 8, false)
     }
 
     /// Configures a driver for the Invensense-based USFS "version 1", which includes:
@@ -453,6 +453,12 @@ where
     ///  5  | GyroResult
     pub fn check_status(&mut self) -> Result<u8, E> {
         self.read_register(Register::EM7180_EventStatus)
+    }
+
+    /// Check whether a new quaternion solution is available (since last read)
+    pub fn quat_available(&mut self) -> bool {
+        let status = self.check_status().unwrap_or(0);
+        0 != status & (1 << 2)
     }
 
     /// Check ErrorRegister Software-Related Error Conditions on address 0x50
