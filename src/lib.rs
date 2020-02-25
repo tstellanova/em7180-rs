@@ -369,7 +369,11 @@ where
         // Enable interrupt to host upon certain events
         // choose host interrupts when any sensor updated (0x40), new gyro data (0x20), new accel data (0x10),
         // New mag data (0x08), quaternions updated (0x04), an error occurs (0x02), or the SENtral needs to be reset(0x01)
-        self.write_register(Register::EM7180_EnableEvents, 0x07)?;
+        //self.write_register(Register::EM7180_EnableEvents, 0x07)?;
+
+        //only provide an interrupt when quaternion solution is updated (0x02) or there's an error (0x01)
+        self.write_register(Register::EM7180_EnableEvents, 0x03)?;
+
         // Enable EM7180 run mode
         self.write_register(Register::EM7180_HostControl, 0x01)?; // Set SENtral in normal run mode
         
@@ -397,8 +401,8 @@ where
         self.em7180_set_integer_param(0x49, 0x00)?;
 
         // Write desired sensor full scale ranges to the EM7180
-        self.em7180_set_mag_acc_fs(mag_fs, acc_fs)?; // 1000 uT == 0x3E8, 8 g == 0x08
-        self.em7180_set_gyro_fs(gyro_fs)?; // 2000 dps == 0x7D0
+        self.em7180_set_mag_acc_fs(mag_fs, acc_fs)?;
+        self.em7180_set_gyro_fs(gyro_fs)?;
 
         // Read sensor new FS values from parameter space
         self.write_register(Register::EM7180_ParamRequest, 0x4A)?; // Request to read  parameter 74
@@ -565,17 +569,12 @@ where
     /// QZ Normalized Quaternion – Z, or Roll       | Full-Scale Range 0.0 – 1.0 or ±π
     /// QW Normalized Quaternion – W, or 0.0        | Full-Scale Range 0.0 – 1.0
     pub fn read_sentral_quat_qata(&mut self) ->  Result<[f32; 4], E> {
-        let raw_data_qx = self.read_4bytes(Register::EM7180_QX)?;
-        let qx = reg_to_float(&raw_data_qx);
-
-        let raw_data_qy = self.read_4bytes(Register::EM7180_QY)?;
-        let qy = reg_to_float(&raw_data_qy);
-
-        let raw_data_qz = self.read_4bytes(Register::EM7180_QZ)?;
-        let qz = reg_to_float(&raw_data_qz);
-
-        let raw_data_qw = self.read_4bytes(Register::EM7180_QW)?;
-        let qw = reg_to_float(&raw_data_qw);
+        // Read the entire quaternion report in a single block
+        let raw_data_quat = self.read_16bytes(Register::EM7180_QX)?;
+        let qx = slice_to_float(&raw_data_quat[..4]);
+        let qy = slice_to_float(&raw_data_quat[4..8]);
+        let qz = slice_to_float(&raw_data_quat[8..12]);
+        let qw = slice_to_float(&raw_data_quat[12..]);
 
         Ok([qx, qy, qz, qw])
     }
@@ -630,6 +629,7 @@ enum Register {
     EM7180_SavedParamByte3 = 0x3E,
     EM7180_FeatureFlags = 0x39,
     EM7180_SentralStatus = 0x37,
+    EM7180_AlgorithmStatus = 0x38,
     EM7180_ResetRequest = 0x9B,
     EM7180_RunStatus = 0x92,
     EM7180_QX = 0x00, // this is a 32-bit normalized floating point number read from registers 0x00-03
@@ -643,10 +643,17 @@ enum Register {
     EM7180_Temp = 0x2E, // start of two-byte MS5637 temperature data, 16-bit signed interger
 }
 
-/// Transform raw quaternion buffer data into something meaningfull
+/// Transform raw quaternion buffer data into something meaningful
 fn reg_to_float(buf: &[u8]) -> f32 {
     unsafe {
         safe_transmute::guarded_transmute::<f32>(buf).unwrap()
+    }
+}
+
+/// Transform a slice into an f32
+fn slice_to_float(buf: &[u8]) -> f32 {
+    unsafe {
+        safe_transmute::guarded_transmute::<f32>(buf).unwrap_or(0f32)
     }
 }
 
