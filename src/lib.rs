@@ -1,8 +1,7 @@
 #![no_std]
 
-//! Manages a new EM7180 sensor hub with MPU9250 gyro/accelerometer,
-//! embedded Asahi Kasei AK8963C magnetometer, Measurement Specialties'
-//! MS5637 Barometer and ST's M24512DFC I2C EEPROM module
+//! Manages an EM7180 sensor hub, providing settings for various
+//! Ultimate Sensor Fusion Solution (USFS) configurations
 
 #![deny(
     missing_docs,
@@ -30,6 +29,9 @@ use generic_array::{ArrayLength, GenericArray};
 
 /// Sometimes it's correct (0x28 << 1) instead of 0x28
 const EM7180_ADDRESS: u8 = 0x28;
+
+/// The product ID for the EM7180 that this driver works with
+const EM7180_PRODUCT_ID: u8 = 0x80;
 
 /// Struct for USFS
 #[derive(Debug, Copy, Clone)]
@@ -66,11 +68,13 @@ where
     where
         I2C: WriteRead<Error = E>,
     {
-        USFS::new(i2c, EM7180_ADDRESS, 8, false)
+        USFS::new_inv_usfs1(i2c, EM7180_ADDRESS, 8, false)
     }
 
-    /// Creates a sensor with specific configuration
-    pub fn new(i2c: I2C, address: u8, int_pin: u8, pass_thru: bool) -> Result<USFS<I2C>, Error<E>>
+    /// Configures a driver for the Invensense-based USFS "version 1", which includes:
+    /// MPU9250 gyro/accelerometer, embedded Asahi Kasei AK8963C magnetometer, Measurement Specialties'
+    /// MS5637 Barometer, and ST's M24512DFC I2C EEPROM module
+    pub fn new_inv_usfs1(i2c: I2C, address: u8, int_pin: u8, pass_thru: bool) -> Result<USFS<I2C>, Error<E>>
     where
         I2C: WriteRead<Error = E>,
     {
@@ -82,8 +86,7 @@ where
         };
 
         let wai = chip.get_product_id()?;
-
-        if wai == 0x80 {
+        if wai == EM7180_PRODUCT_ID {
 
         /*
             Choose EM7180, MPU9250 and MS5637 sample rates and bandwidths
@@ -115,6 +118,77 @@ where
             let mag_fs: u16 = 0x3E8;
 
             chip.load_fw_from_eeprom()?;
+            chip.init_hardware(acc_bw, gyro_bw, acc_fs, gyro_fs, mag_fs, qrt_div, mag_rt, acc_rt, gyro_rt, baro_rt)?;
+            Ok(chip)
+        } else {
+            Err(Error::InvalidDevice(wai))
+        }
+    }
+
+    /// Configure a driver for the ST-based USFS "version 1", which includes:
+    /// LSM6DSM accel, LSM6DSM gyro, LIS2MDL mag, LPS22HB baro,
+    /// and ST's M24512DFC I2C EEPROM module
+    pub fn new_st_usfs1(i2c: I2C, address: u8, int_pin: u8, pass_thru: bool) -> Result<USFS<I2C>, Error<E>>
+        where
+            I2C: WriteRead<Error = E>,
+    {
+        let mut chip = USFS {
+            com: i2c,
+            address,
+            int_pin,
+            pass_thru
+        };
+
+        //TODO utilize int_pin?
+
+        let wai = chip.get_product_id()?;
+        if wai == EM7180_PRODUCT_ID {
+            /*
+            Select bandwidths, sample rates, and scales for ST-based USFS
+
+            Bandwidths (LPF config):
+            acc_bw:  (0x05) //ODR div 400, LSM6DSM accel
+            gyro_bw: (0x00) //LPF 167, LSM6DSM gyro
+            mag_bw:  (0x01) //ODR div 4, LIS2MDL mag
+            baro_bw: (0x00) //ODR div 2, LPS22HB baro
+
+            Rates:
+            LSM6DSM accel
+            acc_rt: 834 Hz (0x53)
+            LSM6DSM gyro
+            gyro_rt: 834 Hz (0x53)
+            LIS2MDL mag
+            mag_rt: 100Hz (0x64)
+            LPS22HB baro
+            baro_rt: 25 Hz (0x19)
+            qrt_div: 8 Hz (0x07)
+            (quaternion rate = gyro_rt / (1 + qrt_div)
+
+            Scales:
+            LSM6DSM accel
+            acc_fs: 8 g (0x08)
+            LSM6DSM gyro
+            gyro_fs: 2000DPS (0x7D0)
+            LSM6DSM mag
+            mag_fs: 4915uT (0x133)
+            */
+
+            //sensor bandwidths
+            let acc_bw: u8 = 0x05; //LSM6DSM_ACC_LPF_ODR_DIV400
+            let gyro_bw: u8 = 0x00; //LSM6DSM_GYRO_LPF_167
+            // sensor rates
+            let acc_rt: u8 = 0x53; // 834Hz  (834/10)
+            let gyro_rt: u8 = 0x53;// 834Hz (834/10)
+            let mag_rt: u8 = 0x64;// 100Hz
+            let baro_rt: u8 = 0x19; // 25 Hz
+            let qrt_div: u8 = 0x07;// 8 Hz
+            // sensor scales
+            let acc_fs: u16 = 0x08;
+            let gyro_fs: u16 = 0x7D0;
+            let mag_fs: u16 = 0x133;
+
+            chip.load_fw_from_eeprom()?;
+            //TODO change below signature to allow setting mag and baro LPF
             chip.init_hardware(acc_bw, gyro_bw, acc_fs, gyro_fs, mag_fs, qrt_div, mag_rt, acc_rt, gyro_rt, baro_rt)?;
             Ok(chip)
         } else {
@@ -279,12 +353,16 @@ where
         // Setup LPF bandwidth (BEFORE setting ODR's)
         self.write_register(Register::EM7180_ACC_LPF_BW, acc_bw)?;   // accBW = 3 = 41Hz
         self.write_register(Register::EM7180_GYRO_LPF_BW, gyro_bw)?; // gyroBW = 3 = 41Hz
+        //TODO set baro and mag LPFs:
+        //self.write_register(Register::EM7180_MAG_LPF_BW, mag_bw)?;
+        //self.write_register(Register::EM7180_BARO_LPF_BW, baro_bw)?;
+
         // Set accel/gyro/mag desired ODR rates
         self.write_register(Register::EM7180_QRateDivisor, qrt_div)?; // quat rate = gyroRt/(1 QRTDiv)
-        self.write_register(Register::EM7180_MagRate, mag_rt)?; // 0x64 = 100 Hz
-        self.write_register(Register::EM7180_AccelRate, acc_rt)?; // 200/10 Hz, 0x14 = 200 Hz
-        self.write_register(Register::EM7180_GyroRate, gyro_rt)?; // 200/10 Hz, 0x14 = 200 Hz
-        self.write_register(Register::EM7180_BaroRate, 0x80 | baro_rt)?;  // Set enable bit and set Baro rate to 25 Hz, rate = baroRt/2, 0x32 = 25 Hz
+        self.write_register(Register::EM7180_MagRate, mag_rt)?;
+        self.write_register(Register::EM7180_AccelRate, acc_rt)?;
+        self.write_register(Register::EM7180_GyroRate, gyro_rt)?;
+        self.write_register(Register::EM7180_BaroRate, 0x80 | baro_rt)?;  // Set enable bit and set Baro rate
 
         // Configure operating mode
         self.write_register(Register::EM7180_AlgorithmControl, 0x00)?; // Read scale sensor data
@@ -342,12 +420,12 @@ where
         Ok(())
     }
 
-    /// Get ProductID, should be: 0x80
+    /// Get ProductID, should be EM7180_PRODUCT_ID
     pub fn get_product_id(&mut self) -> Result<u8, E> {
         self.read_register(Register::EM7180_ProductID)
     }
 
-    /// Get ProductID, should be: 0xE609
+    /// Get ROM version, should be: 0xE609
     pub fn get_rom_version(&mut self) -> Result<[u8; 2], E> {
         let rom_version1 = self.read_register(Register::EM7180_ROMVersion1)?;
         let rom_version2 = self.read_register(Register::EM7180_ROMVersion2)?;
@@ -519,6 +597,8 @@ enum Register {
     EM7180_PassThruControl = 0xA0,
     EM7180_ACC_LPF_BW = 0x5B,
     EM7180_GYRO_LPF_BW = 0x5C,
+    EM7180_MAG_LPF_BW =  0x5D,
+    EM7180_BARO_LPF_BW = 0x5E,
     EM7180_QRateDivisor = 0x32,
     EM7180_MagRate = 0x55,
     EM7180_AccelRate = 0x56,
