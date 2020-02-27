@@ -68,13 +68,15 @@ where
     where
         I2C: WriteRead<Error = E>,
     {
-        USFS::new_inv_usfs1(i2c, EM7180_DEFAULT_ADDRESS, 8, false)
+        USFS::new_inv_usfs_01(i2c, EM7180_DEFAULT_ADDRESS, 8, false)
     }
 
     /// Configures a driver for the Invensense-based USFS "version 1", which includes:
-    /// MPU9250 gyro/accelerometer, embedded Asahi Kasei AK8963C magnetometer, Measurement Specialties'
-    /// MS5637 Barometer, and ST's M24512DFC I2C EEPROM module
-    pub fn new_inv_usfs1(i2c: I2C, address: u8, int_pin: u8, pass_thru: bool) -> Result<USFS<I2C>, Error<E>>
+    /// MPU9250 gyro/accelerometer,
+    /// embedded Asahi Kasei AK8963C magnetometer,
+    /// Measurement Specialties' MS5637 Barometer,
+    /// and ST's M24512DFC I2C EEPROM module
+    pub fn new_inv_usfs_01(i2c: I2C, address: u8, int_pin: u8, pass_thru: bool) -> Result<USFS<I2C>, Error<E>>
     where
         I2C: WriteRead<Error = E>,
     {
@@ -125,10 +127,66 @@ where
         }
     }
 
-    /// Configure a driver for the ST-based USFS "version 1", which includes:
+    /// Configures a driver for the Invensense-based USFS "v.03", which includes:
+    /// MPU9250 gyro/accelerometer,
+    /// embedded Asahi Kasei AK8963C magnetometer,
+    /// BMP280 baro
+    /// and ST's M24512DFC I2C EEPROM module
+    pub fn new_inv_usfs_03(i2c: I2C, address: u8, int_pin: u8, pass_thru: bool) -> Result<USFS<I2C>, Error<E>>
+        where
+            I2C: WriteRead<Error = E>,
+    {
+        let mut chip = USFS {
+            com: i2c,
+            address,
+            int_pin,
+            pass_thru
+        };
+
+        let wai = chip.get_product_id()?;
+        if wai == EM7180_PRODUCT_ID {
+
+            /*
+            Select bandwidths, sample rates, and scales
+                Choices are:
+                accBW, gyroBW 0x00 = 250 Hz, 0x01 = 184 Hz, 0x02 = 92 Hz, 0x03 = 41 Hz, 0x04 = 20 Hz, 0x05 = 10 Hz, 0x06 = 5 Hz, 0x07 = no filter (3600 Hz)
+                QRtDiv 0x00, 0x01, 0x02, etc quat rate = gyroRt/(1 + QRtDiv)
+                magRt 8 Hz = 0x08 or 100 Hz 0x64
+                accRt, gyroRt 1000, 500, 250, 200, 125, 100, 50 Hz enter by choosing desired rate
+                and dividing by 10, so 200 Hz would be 200/10 = 20 = 0x14
+                sample rate of barometer is baroRt/2 so for 25 Hz enter 50 = 0x32
+
+                uint8_t accBW = 0x03, gyroBW = 0x03, QRtDiv = 0x01, magRt = 0x64, accRt = 0x14, gyroRt = 0x14, baroRt = 0x32;
+
+                Choose MPU9250 sensor full ranges
+                Choices are 2, 4, 8, 16 g for accFS, 250, 500, 1000, and 2000 dps for gyro FS and 1000 uT for magFS expressed as HEX values
+
+                uint16_t accFS = 0x08, gyroFS = 0x7D0, magFS = 0x3E8;
+            */
+
+            let acc_bw: u8 = 0x03;
+            let gyro_bw: u8 = 0x03;
+            let qrt_div: u8 = 0x01;
+            let mag_rt: u8 = 0x64;
+            let acc_rt: u8 = 0x14;
+            let gyro_rt: u8 = 0x14;
+            let baro_rt: u8 = 0x32;
+            let acc_fs: u16 = 0x08;
+            let gyro_fs: u16 = 0x7D0;
+            let mag_fs: u16 = 0x3E8;
+
+            chip.load_fw_from_eeprom()?;
+            chip.init_hardware(acc_bw, gyro_bw, acc_fs, gyro_fs, mag_fs, qrt_div, mag_rt, acc_rt, gyro_rt, baro_rt)?;
+            Ok(chip)
+        } else {
+            Err(Error::InvalidDevice(wai))
+        }
+    }
+
+    /// Configure a driver for the ST-based USFS "v.01a", which includes:
     /// LSM6DSM accel, LSM6DSM gyro, LIS2MDL mag, LPS22HB baro,
     /// and ST's M24512DFC I2C EEPROM module
-    pub fn new_st_usfs1(i2c: I2C, address: u8, int_pin: u8, pass_thru: bool) -> Result<USFS<I2C>, Error<E>>
+    pub fn new_st_usfs_01(i2c: I2C, address: u8, int_pin: u8, pass_thru: bool) -> Result<USFS<I2C>, Error<E>>
         where
             I2C: WriteRead<Error = E>,
     {
@@ -240,6 +298,14 @@ where
         ret.copy_from_slice(buffer.as_slice());
 
         Ok(ret)
+    }
+
+    fn read_n_bytes(&mut self, reg: Register,  read_buf: &mut [u8]) -> Result<(), E> {
+        const I2C_AUTO_INCREMENT: u8 = 0;
+        self.com
+            .write_read(self.address, &[(reg as u8) | I2C_AUTO_INCREMENT], read_buf)?;
+
+        Ok(())
     }
 
     fn read_register(&mut self, reg: Register) -> Result<u8, E> {
@@ -569,12 +635,15 @@ where
     /// QZ Normalized Quaternion – Z, or Roll       | Full-Scale Range 0.0 – 1.0 or ±π
     /// QW Normalized Quaternion – W, or 0.0        | Full-Scale Range 0.0 – 1.0
     pub fn read_sentral_quat_qata(&mut self) ->  Result<[f32; 4], E> {
+        let mut raw_data_quat:[u8; 18] = [0; 18];
         // Read the entire quaternion report in a single block
-        let raw_data_quat = self.read_16bytes(Register::EM7180_QX)?;
+        self.read_n_bytes(Register::EM7180_QX, &mut raw_data_quat)?;
+        //let raw_data_quat = self.read_16bytes(Register::EM7180_QX)?;
         let qx = slice_to_float(&raw_data_quat[..4]);
         let qy = slice_to_float(&raw_data_quat[4..8]);
         let qz = slice_to_float(&raw_data_quat[8..12]);
-        let qw = slice_to_float(&raw_data_quat[12..]);
+        let qw = slice_to_float(&raw_data_quat[12..16]);
+        // we ignore qt, the time at which the quaternion was calculated
 
         Ok([qx, qy, qz, qw])
     }
